@@ -15,14 +15,14 @@ st.set_page_config(
 )
 
 TEXTURES = {
-    "MKSC-01": "textures/MKSC-01.jpg",
-    "MKSC-03": "textures/MKSC-03.jpg",
-    "MKSC-05": "textures/MKSC-05.jpg",
-    "MKSC-07": "textures/MKSC-07.jpg",
-    "MKSC-09": "textures/MKSC-09.jpg",
-    "MKSC-10": "textures/MKSC-10.jpg",
-    "MKSC-11": "textures/MKSC-11.jpg",
-    "MKSC-12": "textures/MKSC-12.jpg",
+    "MKSC-01": "textures/MKSC-01.png",
+    "MKSC-03": "textures/MKSC-03.png",
+    "MKSC-05": "textures/MKSC-05.png",
+    "MKSC-07": "textures/MKSC-07.png",
+    "MKSC-09": "textures/MKSC-09.png",
+    "MKSC-10": "textures/MKSC-10.png",
+    "MKSC-11": "textures/MKSC-11.png",
+    "MKSC-12": "textures/MKSC-12.png",
 }
 
 # =============================================
