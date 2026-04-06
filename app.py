@@ -1,5 +1,3 @@
-# app.py
-
 import streamlit as st
 import onnxruntime as ort
 import numpy as np
@@ -25,9 +23,6 @@ TEXTURES = {
     "MKSC-12": "textures/MKSC-12.png",
 }
 
-# =============================================
-# LOAD MODEL
-# =============================================
 @st.cache_resource
 def load_model():
     return ort.InferenceSession("best.onnx", providers=["CPUExecutionProvider"])
@@ -35,9 +30,6 @@ def load_model():
 session = load_model()
 input_name = session.get_inputs()[0].name
 
-# =============================================
-# HELPER FUNCTIONS
-# =============================================
 def preprocess_image(img_bgr, imgsz=640):
     img_resized = cv2.resize(img_bgr, (imgsz, imgsz))
     img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
@@ -52,21 +44,39 @@ def get_floor_mask(session, img_bgr, conf_threshold=0.25):
     inp = preprocess_image(img_bgr, imgsz)
     outputs = session.run(None, {input_name: inp})
 
-    detections = outputs[0][0]
-    proto = outputs[1][0]
+    det_output = outputs[0]
+    proto_output = outputs[1]
+
+    if len(det_output.shape) == 3:
+        detections = det_output[0]  
+    else:
+        detections = det_output
+
+    if len(proto_output.shape) == 4:
+        proto = proto_output[0] 
+    else:
+        proto = proto_output
+
+    if proto.shape[0] != 32:
+        proto = proto.transpose(2, 0, 1) 
 
     mask_combined = np.zeros((imgsz, imgsz), dtype=np.float32)
     found = False
 
     for det in detections:
-        conf = det[4]
+        if len(det) < 6:
+            continue
+
+        conf = float(det[4])
         cls = int(det[5])
         if conf < conf_threshold or cls != 0:
             continue
 
         found = True
-        cx, cy, w, h = det[0], det[1], det[2], det[3]
-        mask_coef = det[6:]
+        cx, cy, w, h = float(det[0]), float(det[1]), float(det[2]), float(det[3])
+        mask_coef = det[6:38]  
+        if mask_coef.shape[0] != 32:
+            continue
 
         mask = np.einsum('c,chw->hw', mask_coef, proto)
         mask = 1 / (1 + np.exp(-mask))
@@ -156,9 +166,7 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr):
 
     return result
 
-# =============================================
-# UI
-# =============================================
+
 st.title("🏠 Floor Texture Replacer")
 st.write("Upload foto ruangan, pilih tekstur lantai, lalu lihat hasilnya.")
 
@@ -166,7 +174,6 @@ room_file = st.file_uploader("📷 Upload foto ruangan", type=["jpg", "jpeg", "p
 
 st.subheader("Pilih tekstur lantai")
 
-# Tampilkan preview tekstur dalam grid
 cols = st.columns(4)
 selected_texture = st.session_state.get("selected_texture", "MKSC-01")
 
