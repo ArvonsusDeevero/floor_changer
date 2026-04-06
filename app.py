@@ -1,3 +1,5 @@
+# app.py
+
 import streamlit as st
 import onnxruntime as ort
 import numpy as np
@@ -6,6 +8,9 @@ from PIL import Image
 import io
 import os
 
+# =============================================
+# CONFIG
+# =============================================
 st.set_page_config(
     page_title="Floor Texture Replacer",
     page_icon="🏠",
@@ -27,6 +32,9 @@ MAX_FILE_SIZE_MB = 10
 MAX_DIMENSION    = 4096
 ALLOWED_TYPES    = {"jpg", "jpeg", "png"}
 
+# =============================================
+# LOAD MODEL
+# =============================================
 @st.cache_resource
 def load_model():
     if not os.path.exists("best.onnx"):
@@ -34,9 +42,12 @@ def load_model():
         st.stop()
     return ort.InferenceSession("best.onnx", providers=["CPUExecutionProvider"])
 
-session   = load_model()
+session    = load_model()
 input_name = session.get_inputs()[0].name
 
+# =============================================
+# VALIDASI INPUT
+# =============================================
 def validate_image(uploaded_file):
     if uploaded_file is None:
         return None, "File tidak ditemukan."
@@ -50,7 +61,7 @@ def validate_image(uploaded_file):
         return None, f"Ukuran file terlalu besar ({size_mb:.1f} MB). Maksimal {MAX_FILE_SIZE_MB} MB."
 
     try:
-        img = Image.open(uploaded_file).convert("RGB")
+        img  = Image.open(uploaded_file).convert("RGB")
         w, h = img.size
         if w > MAX_DIMENSION or h > MAX_DIMENSION:
             return None, f"Resolusi terlalu besar ({w}x{h}). Maksimal {MAX_DIMENSION}px."
@@ -71,6 +82,9 @@ def validate_texture(name):
         return None, f"File tekstur {name} tidak bisa dibaca."
     return texture, None
 
+# =============================================
+# HELPER FUNCTIONS
+# =============================================
 def preprocess_image(img_bgr, imgsz=640):
     img_resized    = cv2.resize(img_bgr, (imgsz, imgsz))
     img_rgb        = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
@@ -80,16 +94,18 @@ def preprocess_image(img_bgr, imgsz=640):
 
 def get_floor_mask(session, img_bgr, conf_threshold=0.25):
     orig_h, orig_w = img_bgr.shape[:2]
-    imgsz = 640
+    imgsz          = 640
 
     inp     = preprocess_image(img_bgr, imgsz)
     outputs = session.run(None, {input_name: inp})
 
+    # Output[0]: (1, 37, 8400) → transpose → (8400, 37)
+    # Output[1]: (1, 32, 160, 160)
     detections = outputs[0][0].transpose(1, 0)
     proto      = outputs[1][0]  # (32, 160, 160)
 
     mask_combined = np.zeros((imgsz, imgsz), dtype=np.float32)
-    found = False
+    found         = False
 
     for det in detections:
         cx, cy, w, h = float(det[0]), float(det[1]), float(det[2]), float(det[3])
@@ -102,10 +118,9 @@ def get_floor_mask(session, img_bgr, conf_threshold=0.25):
         if mask_coef.shape[0] != 32:
             continue
 
-        found = True
-
-        mask_raw = np.einsum('c,chw->hw', mask_coef, proto)
-        mask_sig = 1 / (1 + np.exp(-mask_raw))
+        found        = True
+        mask_raw     = np.einsum('c,chw->hw', mask_coef, proto)
+        mask_sig     = 1 / (1 + np.exp(-mask_raw))
 
         x1 = max(0,   int((cx - w / 2) / imgsz * 160))
         y1 = max(0,   int((cy - h / 2) / imgsz * 160))
@@ -115,10 +130,10 @@ def get_floor_mask(session, img_bgr, conf_threshold=0.25):
         if x2 <= x1 or y2 <= y1:
             continue
 
-        mask_crop          = np.zeros((160, 160), dtype=np.float32)
+        mask_crop               = np.zeros((160, 160), dtype=np.float32)
         mask_crop[y1:y2, x1:x2] = mask_sig[y1:y2, x1:x2]
-        mask_full          = cv2.resize(mask_crop, (imgsz, imgsz))
-        mask_combined      = np.maximum(mask_combined, mask_full)
+        mask_full               = cv2.resize(mask_crop, (imgsz, imgsz))
+        mask_combined           = np.maximum(mask_combined, mask_full)
 
     if not found:
         return None
@@ -133,39 +148,71 @@ def get_floor_mask(session, img_bgr, conf_threshold=0.25):
     return binary_mask
 
 def order_points(pts):
-    rect      = np.zeros((4, 2), dtype=np.float32)
-    s         = pts.sum(axis=1)
-    diff      = np.diff(pts, axis=1)
-    rect[0]   = pts[np.argmin(s)]
-    rect[2]   = pts[np.argmax(s)]
-    rect[1]   = pts[np.argmin(diff)]
-    rect[3]   = pts[np.argmax(diff)]
+    rect     = np.zeros((4, 2), dtype=np.float32)
+    s        = pts.sum(axis=1)
+    diff     = np.diff(pts, axis=1)
+    rect[0]  = pts[np.argmin(s)]
+    rect[2]  = pts[np.argmax(s)]
+    rect[1]  = pts[np.argmin(diff)]
+    rect[3]  = pts[np.argmax(diff)]
     return rect
+
+def get_vanishing_point_transform(mask):
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    largest = max(contours, key=cv2.contourArea)
+    rect    = cv2.minAreaRect(largest)
+    box     = cv2.boxPoints(rect).astype(np.float32)
+    return order_points(box)
+
+def transfer_lighting(original_floor, texture_warped, mask):
+    orig_lab = cv2.cvtColor(original_floor, cv2.COLOR_BGR2LAB).astype(np.float32)
+    tex_lab  = cv2.cvtColor(texture_warped, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+    orig_l     = orig_lab[:, :, 0]
+    tex_l      = tex_lab[:, :, 0]
+    floor_area = mask > 0
+
+    if floor_area.sum() == 0:
+        return texture_warped
+
+    orig_mean = orig_l[floor_area].mean()
+    orig_std  = orig_l[floor_area].std() + 1e-6
+    tex_mean  = tex_l[floor_area].mean()
+    tex_std   = tex_l[floor_area].std() + 1e-6
+
+    tex_l_adjusted = (tex_l - tex_mean) / tex_std * orig_std + orig_mean
+    tex_l_adjusted = np.clip(tex_l_adjusted, 0, 255)
+
+    # 70% lighting asli, 30% tekstur sendiri
+    blend_l        = 0.7 * tex_l_adjusted + 0.3 * tex_l
+    blend_l        = np.clip(blend_l, 0, 255)
+
+    tex_lab[:, :, 0] = blend_l
+    return cv2.cvtColor(tex_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+def apply_ambient_occlusion(img_bgr, mask):
+    kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (40, 40))
+    mask_eroded  = cv2.erode(mask, kernel_large)
+    edge_area    = mask - mask_eroded
+
+    shadow_map   = cv2.GaussianBlur(edge_area.astype(np.float32), (61, 61), 0)
+    shadow_max   = shadow_map.max()
+    if shadow_max > 0:
+        shadow_map = shadow_map / shadow_max
+
+    shadow_3ch   = np.stack([shadow_map] * 3, axis=-1)
+    result       = img_bgr.astype(np.float32) * (1 - 0.2 * shadow_3ch)
+    return np.clip(result, 0, 255).astype(np.uint8)
 
 def apply_texture_perspective(img_bgr, mask, texture_bgr):
     orig_h, orig_w = img_bgr.shape[:2]
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
+    dst_pts = get_vanishing_point_transform(mask)
+    if dst_pts is None:
         return img_bgr
-
-    largest = max(contours, key=cv2.contourArea)
-    epsilon = 0.02 * cv2.arcLength(largest, True)
-    approx  = cv2.approxPolyDP(largest, epsilon, True)
-
-    if len(approx) == 4:
-        dst_pts = order_points(approx.reshape(4, 2).astype(np.float32))
-    else:
-        hull     = cv2.convexHull(largest)
-        hull_pts = hull.reshape(-1, 2).astype(np.float32)
-        s        = hull_pts.sum(axis=1)
-        diff     = np.diff(hull_pts, axis=1).flatten()
-        dst_pts  = np.array([
-            hull_pts[np.argmin(s)],
-            hull_pts[np.argmin(diff)],
-            hull_pts[np.argmax(s)],
-            hull_pts[np.argmax(diff)],
-        ], dtype=np.float32)
 
     max_w = max(int(max(
         np.linalg.norm(dst_pts[1] - dst_pts[0]),
@@ -183,16 +230,24 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr):
         [0,         max_h - 1],
     ], dtype=np.float32)
 
-    texture_resized = cv2.resize(texture_bgr, (max_w, max_h))
-    M               = cv2.getPerspectiveTransform(src_pts, dst_pts)
-    texture_warped  = cv2.warpPerspective(texture_resized, M, (orig_w, orig_h))
+    texture_resized  = cv2.resize(texture_bgr, (max_w, max_h))
+    M                = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    texture_warped   = cv2.warpPerspective(texture_resized, M, (orig_w, orig_h))
 
-    mask_blur = cv2.GaussianBlur(mask.astype(np.float32), (21, 21), 0)
-    mask_3ch  = np.stack([mask_blur] * 3, axis=-1)
-    result    = (mask_3ch * texture_warped + (1 - mask_3ch) * img_bgr).astype(np.uint8)
+    mask_3ch         = np.stack([mask] * 3, axis=-1)
+    original_floor   = (img_bgr * mask_3ch).astype(np.uint8)
+    texture_lit      = transfer_lighting(original_floor, texture_warped, mask)
+
+    mask_blur        = cv2.GaussianBlur(mask.astype(np.float32), (21, 21), 0)
+    mask_3ch_float   = np.stack([mask_blur] * 3, axis=-1)
+    result           = (mask_3ch_float * texture_lit + (1 - mask_3ch_float) * img_bgr).astype(np.uint8)
+    result           = apply_ambient_occlusion(result, mask)
 
     return result
 
+# =============================================
+# UI
+# =============================================
 st.title("🏠 Floor Texture Replacer")
 st.write("Upload foto ruangan, pilih tekstur lantai, lalu lihat hasilnya.")
 
