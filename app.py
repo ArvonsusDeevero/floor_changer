@@ -33,9 +33,6 @@ ALLOWED_TYPES    = {"jpg", "jpeg", "png"}
 # Ukuran tile tekstur dalam piksel (semakin kecil = serat lebih halus)
 TEXTURE_TILE_SIZE = 300
 
-# =============================================
-# LOAD MODEL
-# =============================================
 @st.cache_resource
 def load_model():
     if not os.path.exists("best.onnx"):
@@ -53,9 +50,6 @@ def load_model():
 session    = load_model()
 input_name = session.get_inputs()[0].name
 
-# =============================================
-# VALIDASI INPUT
-# =============================================
 def validate_image(uploaded_file):
     if uploaded_file is None:
         return None, "File tidak ditemukan."
@@ -96,9 +90,6 @@ def validate_texture(name):
         return None, f"File tekstur {name} tidak bisa dibaca."
     return texture, None
 
-# =============================================
-# HELPER: PREPROCESSING
-# =============================================
 def preprocess_image(img_bgr, imgsz=640):
     img_resized    = cv2.resize(img_bgr, (imgsz, imgsz))
     img_rgb        = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
@@ -106,66 +97,89 @@ def preprocess_image(img_bgr, imgsz=640):
     img_transposed = np.transpose(img_norm, (2, 0, 1))
     return np.expand_dims(img_transposed, axis=0)
 
-# =============================================
-# HELPER: FLOOR MASK
-# =============================================
 def get_floor_mask(session, img_bgr, conf_threshold=0.25):
     orig_h, orig_w = img_bgr.shape[:2]
-    imgsz          = 640
+    imgsz = 640
 
-    inp     = preprocess_image(img_bgr, imgsz)
+    inp = preprocess_image(img_bgr, imgsz)
     outputs = session.run(None, {input_name: inp})
 
-    # Output[0]: (1, 37, 8400) → transpose → (8400, 37)
-    # Output[1]: (1, 32, 160, 160)
     detections = outputs[0][0].transpose(1, 0)
-    proto      = outputs[1][0]   # (32, 160, 160)
-
-    mask_combined = np.zeros((imgsz, imgsz), dtype=np.float32)
-    found         = False
+    proto = outputs[1][0]  # (32, 160, 160)
+    
+    best_det = None
+    best_area = 0
 
     for det in detections:
         cx, cy, w, h = float(det[0]), float(det[1]), float(det[2]), float(det[3])
-        cls_score    = float(det[4])
+        cls_score = float(det[4])
 
         if cls_score < conf_threshold:
             continue
 
-        mask_coef = det[5:37]
-        if mask_coef.shape[0] != 32:
-            continue
+        area = w * h
+        if area > best_area:
+            best_area = area
+            best_det = det
 
-        found    = True
-        mask_raw = np.einsum('c,chw->hw', mask_coef, proto)
-        mask_sig = 1 / (1 + np.exp(-mask_raw))
-
-        x1 = max(0,   int((cx - w / 2) / imgsz * 160))
-        y1 = max(0,   int((cy - h / 2) / imgsz * 160))
-        x2 = min(160, int((cx + w / 2) / imgsz * 160))
-        y2 = min(160, int((cy + h / 2) / imgsz * 160))
-
-        if x2 <= x1 or y2 <= y1:
-            continue
-
-        mask_crop               = np.zeros((160, 160), dtype=np.float32)
-        mask_crop[y1:y2, x1:x2] = mask_sig[y1:y2, x1:x2]
-        mask_full               = cv2.resize(mask_crop, (imgsz, imgsz))
-        mask_combined           = np.maximum(mask_combined, mask_full)
-
-    if not found:
+    if best_det is None:
         return None
 
-    mask_orig   = cv2.resize(mask_combined, (orig_w, orig_h))
-    binary_mask = (mask_orig > 0.5).astype(np.uint8)
+    # =========================================
+    # 🔥 BUILD MASK DARI DETEKSI TERPILIH
+    # =========================================
+    mask_combined = np.zeros((imgsz, imgsz), dtype=np.float32)
 
-    # Morphology: hilangkan noise kecil & tutup lubang
+    det = best_det
+    cx, cy, w, h = float(det[0]), float(det[1]), float(det[2]), float(det[3])
+
+    mask_coef = det[5:37]
+
+    mask_raw = np.einsum('c,chw->hw', mask_coef, proto)
+    mask_sig = 1 / (1 + np.exp(-mask_raw))
+
+    # 🔥 smoothing awal (penting)
+    mask_sig = cv2.GaussianBlur(mask_sig, (7,7), 0)
+
+    # bbox ke koordinat proto
+    x1 = max(0,   int((cx - w / 2) / imgsz * 160))
+    y1 = max(0,   int((cy - h / 2) / imgsz * 160))
+    x2 = min(160, int((cx + w / 2) / imgsz * 160))
+    y2 = min(160, int((cy + h / 2) / imgsz * 160))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    mask_crop = np.zeros((160, 160), dtype=np.float32)
+    mask_crop[y1:y2, x1:x2] = mask_sig[y1:y2, x1:x2]
+
+    mask_full = cv2.resize(mask_crop, (imgsz, imgsz))
+    mask_combined = np.maximum(mask_combined, mask_full)
+
+    # =========================================
+    # 🔥 POST-PROCESSING (ANTI NOISE)
+    # =========================================
+    mask_orig = cv2.resize(mask_combined, (orig_w, orig_h))
+
+    # threshold lebih ketat
+    binary_mask = (mask_orig > 0.65).astype(np.uint8)
+
+    # morphology
     kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
     kernel_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (10, 10))
-    binary_mask  = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel_close)
-    binary_mask  = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN,  kernel_open)
 
-    # Hanya ambil komponen terbesar (abaikan lantai kecil yg terfragmentasi)
+    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel_close)
+    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN,  kernel_open)
+
+    # 🔥 hapus noise kecil
+    binary_mask = remove_small_noise(binary_mask, min_area=8000)
+
+    # 🔥 ambil area terbesar
     binary_mask = keep_largest_component(binary_mask)
+
+    # 🔥 smoothing akhir biar ga bergerigi
+    binary_mask = cv2.GaussianBlur(binary_mask.astype(np.float32), (15,15), 0)
+    binary_mask = (binary_mask > 0.5).astype(np.uint8)
 
     return binary_mask
 
@@ -174,9 +188,18 @@ def keep_largest_component(mask):
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if num_labels <= 1:
         return mask
-    # Label 0 = background, skip
     largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
     return (labels == largest).astype(np.uint8)
+
+def remove_small_noise(mask, min_area=5000):
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    new_mask = np.zeros_like(mask)
+
+    for i in range(1, num_labels):
+        if stats[i, cv2.CC_STAT_AREA] > min_area:
+            new_mask[labels == i] = 1
+
+    return new_mask
 
 # =============================================
 # HELPER: TEXTURE TILING
