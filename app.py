@@ -300,13 +300,11 @@ def apply_ambient_occlusion(img_bgr, mask):
 # FIX BUG 3b: blur_radius 41 → 21, power 1.8 → 2.2 (tepi lebih tajam)
 # =============================================
 def create_feathered_mask(mask, blur_radius=21, power=2.2):
-    """
-    ✅ FIX 3b: blur_radius dikurangi dari 41 → 21 agar tepi tidak terlalu buram.
-    power dinaikkan 1.8 → 2.2 agar transisi lebih tajam di tengah.
-    """
     mask_f    = mask.astype(np.float32)
     blurred   = cv2.GaussianBlur(mask_f, (blur_radius, blur_radius), 0)
     feathered = np.power(np.clip(blurred, 0, 1), power)
+
+    st.write(f"feathered mask min/max: {feathered.min():.3f}, {feathered.max():.3f}")
     return feathered
 
 # =============================================
@@ -398,7 +396,11 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     alpha = create_feathered_mask(mask, blur_radius=21, power=feather_power)
     alpha_3ch = np.stack([alpha] * 3, axis=-1)
 
-    result = (alpha_3ch * texture_lit + (1 - alpha_3ch) * img_bgr).astype(np.uint8)
+    img_bgr_f    = img_bgr.astype(np.float32)
+    texture_lit_f = texture_lit.astype(np.float32)
+
+    result = (alpha_3ch * texture_lit_f + (1 - alpha_3ch) * img_bgr_f)
+    result = np.clip(result, 0, 255).astype(np.uint8)    
 
     with st.expander("🔬 Before Ambient Occlusion"):
         st.write(f"result min/max: {result.min()}, {result.max()}")
