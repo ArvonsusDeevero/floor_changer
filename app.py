@@ -347,15 +347,29 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     texture_warped = cv2.warpPerspective(texture_tiled, M, (orig_w, orig_h))
     st.write(f"texture_warped min/max: {texture_warped.min()}, {texture_warped.max()}")
 
+    cv2.imwrite("debug_1_texture_warped.jpg", texture_warped)
+
     mask_3ch       = np.stack([mask] * 3, axis=-1).astype(np.float32) / 1.0
     original_floor = (img_bgr.astype(np.float32) * mask_3ch).astype(np.uint8)
+
+    cv2.imwrite("debug_2_original_floor.jpg", original_floor)
+    st.write(f"original_floor min/max: {original_floor.min()}, {original_floor.max()}")
+
     texture_lit    = transfer_lighting(original_floor, texture_warped, mask)
+
+    cv2.imwrite("debug_3_texture_lit.jpg", texture_lit)
+    st.write(f"texture_lit min/max: {texture_lit.min()}, {texture_lit.max()}")
 
     alpha     = create_feathered_mask(mask, blur_radius=21, power=feather_power)
     alpha_3ch = np.stack([alpha] * 3, axis=-1)
 
     result = (alpha_3ch * texture_lit + (1 - alpha_3ch) * img_bgr).astype(np.uint8)
+
+    cv2.imwrite("debug_4_before_ao.jpg", result)
+    st.write(f"result before AO min/max: {result.min()}, {result.max()}")
+
     result = apply_ambient_occlusion(result, mask)
+    cv2.imwrite("debug_5_final.jpg", result)
 
     return result
 
