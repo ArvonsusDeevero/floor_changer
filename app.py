@@ -282,38 +282,30 @@ def transfer_lighting(original_floor_bgr, texture_warped_bgr, mask):
 # AMBIENT OCCLUSION
 # =============================================
 def apply_ambient_occlusion(img_bgr, mask):
-    """
-    FIXED VERSION:
-    - No negative values (penyebab lantai hitam)
-    - AO lebih soft & realistis
-    - Lebih stabil (no TV static / no overdark)
-    """
-
-    # convert ke float
     mask = mask.astype(np.float32)
 
-    # erode untuk ambil area dalam (bukan tepi)
-    kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (40, 40))
+    # ambil tepi lantai
+    kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (35, 35))
     mask_eroded  = cv2.erode(mask, kernel_large)
 
-    # ✅ FIX 1: hindari nilai negatif
     edge_area = np.clip(mask - mask_eroded, 0, 1)
 
-    # blur biar halus (hindari noise / static)
-    shadow_map = cv2.GaussianBlur(edge_area, (61, 61), 0)
+    # blur halus
+    shadow_map = cv2.GaussianBlur(edge_area, (51, 51), 0)
 
     # normalisasi aman
-    if shadow_map.max() > 0:
-        shadow_map = shadow_map / shadow_map.max()
+    max_val = shadow_map.max()
+    if max_val > 0:
+        shadow_map = shadow_map / max_val
 
-    shadow_map = np.clip(shadow_map, 0, 1)
+    # 🔥 FIX PENTING: batasi area shadow
+    shadow_map = np.clip(shadow_map, 0, 0.6)  # ⬅️ ini kunci
 
-    # ✅ FIX 2: kurangi kekuatan AO (sebelumnya terlalu gelap)
-    strength = 0.10   # coba range 0.08 - 0.15
+    # 🔥 kurangi kekuatan drastis
+    strength = 0.07
 
     shadow_3ch = np.stack([shadow_map]*3, axis=-1)
 
-    # apply shading
     result = img_bgr.astype(np.float32) * (1 - strength * shadow_3ch)
 
     return np.clip(result, 0, 255).astype(np.uint8)
